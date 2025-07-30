@@ -117,7 +117,7 @@ The provider uses two separate lifecycles for comprehensive monitoring:
 
 1. **Execution Lifecycle** - Tracks individual DAG runs
    - Monitors if each run completes within timeout
-   - Timeout defaults to 90% of schedule interval
+   - Timeout defaults to schedule interval
 
 2. **Schedule Lifecycle** - Monitors schedule compliance
    - Uses Telomere's respawn pattern
@@ -127,7 +127,7 @@ The provider uses two separate lifecycles for comprehensive monitoring:
 ### Example: Hourly DAG
 
 For a DAG scheduled to run every hour:
-- **Execution lifecycle** times out after 54 minutes (90% of 1 hour)
+- **Execution lifecycle** times out after 1 hour
 - **Schedule lifecycle** times out if next run doesn't start within 65 minutes
 
 This dual approach ensures you're alerted for both execution delays and scheduling issues.

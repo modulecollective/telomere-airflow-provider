@@ -152,7 +152,7 @@ enable_telomere_tracking(
 # 1. DAG-level monitoring in Telomere:
 #    - "best_practices.production_etl.dag" - tracks each pipeline run
 #    - "best_practices.production_etl.schedule" - monitors schedule compliance
-#    - Alerts if pipeline doesn't start by ~1:54 AM (90% of daily interval)
+#    - Alerts if pipeline doesn't start by ~1:05 AM (24h + 5min grace period)
 #
 # 2. Task-level lifecycles for critical operations:
 #    - "best_practices.extract" - Alert if takes >1 hour or fails
