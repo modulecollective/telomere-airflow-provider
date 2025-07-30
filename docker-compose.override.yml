@@ -1,0 +1,20 @@
+# Development overrides for docker-compose.yml
+# This file is automatically loaded by docker compose
+
+version: '3.8'
+
+services:
+  # Mount source code for live reloading during development
+  airflow-webserver:
+    volumes:
+      - ./src:/opt/telomere-provider/src:ro
+      - ./examples:/opt/airflow/dags:ro
+    environment:
+      PYTHONDONTWRITEBYTECODE: 1
+
+  airflow-scheduler:
+    volumes:
+      - ./src:/opt/telomere-provider/src:ro
+      - ./examples:/opt/airflow/dags:ro
+    environment:
+      PYTHONDONTWRITEBYTECODE: 1
