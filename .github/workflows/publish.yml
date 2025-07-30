@@ -1,5 +1,8 @@
 name: Publish to PyPI
 
+# This workflow uses PyPI's trusted publisher feature for secure publishing
+# See: https://docs.pypi.org/trusted-publishers/
+
 on:
   release:
     types: [published]
@@ -42,9 +45,11 @@ jobs:
   publish-pypi:
     needs: build
     runs-on: ubuntu-latest
+    # The 'pypi' environment must be configured in the repository settings
+    # with the appropriate PyPI project name for trusted publishing
     environment: pypi
     permissions:
-      id-token: write  # Required for trusted publishing
+      id-token: write  # Required for PyPI trusted publishing
     
     steps:
     - name: Download artifacts
@@ -52,12 +57,6 @@ jobs:
       with:
         name: dist
         path: dist/
-    
-    - name: Publish to Test PyPI
-      if: github.event_name == 'workflow_dispatch' && github.event.inputs.test_pypi == 'true'
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        repository-url: https://test.pypi.org/legacy/
     
     - name: Publish to PyPI
       if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.test_pypi != 'true')
