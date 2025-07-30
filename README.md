@@ -352,5 +352,4 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 - 📧 Email: hello@modulecollective.com
 - 🐛 Issues: [GitHub Issues](https://github.com/modulecollective/telomere-airflow-provider/issues)
-- 📖 Telomere Documentation: [telomere.modulecollective.com](https://telomere.modulecollective.com)
-- 💬 Get Help: Contact us through the Telomere platform
+- 📖 Telomere Documentation: [telomere.modulecollective.com](https://telomere.modulecollective.com/docs)
