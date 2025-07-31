@@ -1,6 +1,6 @@
 # Telomere Apache Airflow Provider
 
-Comprehensive Apache Airflow provider for [Telomere](https://telomere.modulecollective.com) lifecycle tracking. Monitor DAG execution, track task timeouts, and ensure scheduled jobs run on time.
+Comprehensive Apache Airflow provider for [Telomere](https://telomere.modulecollective.com) lifecycle tracking. Monitor DAG execution, track task timeouts, and ensure scheduled jobs run on time. Check out our [blog post](https://www.modulecollective.com/posts/telomere-airflow-provider/) for some more details about why we created this.
 
 ## What is Telomere?
 
