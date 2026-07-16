@@ -5,18 +5,25 @@ Hook for interacting with Telomere API.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Optional
-from urllib.parse import urljoin
+from typing import Any
 
 import requests
 from airflow.exceptions import AirflowException
-from airflow.hooks.base import BaseHook
+from airflow.sdk.bases.hook import BaseHook
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
 class TelomereConnectionError(AirflowException):
     """Exception raised when unable to connect to Telomere."""
+
+
+class TelomereApiError(AirflowException):
+    """Exception raised when Telomere returns an HTTP error status."""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class TelomereHook(BaseHook):
@@ -36,10 +43,13 @@ class TelomereHook(BaseHook):
     hook_name = "Telomere"
 
     BASE_URL = "https://telomere.modulecollective.com"
+    DEFAULT_TIMEOUT = 30
 
     def __init__(self, telomere_conn_id: str = default_conn_name) -> None:
+        super().__init__()
         self.telomere_conn_id = telomere_conn_id
-        self._session: Optional[requests.Session] = None
+        self.timeout: int = self.DEFAULT_TIMEOUT
+        self._session: requests.Session | None = None
 
     @property
     def session(self) -> requests.Session:
@@ -69,18 +79,20 @@ class TelomereHook(BaseHook):
         else:
             raise TelomereConnectionError("No API key found in connection")
 
-        # Set up retries
+        # Set up retries. POST is deliberately not retried at this layer: a POST
+        # that reached the server but returned 5xx could otherwise be replayed
+        # and double-start runs. Callers handle idempotency instead (409 on
+        # end/fail is treated as success).
         retry_strategy = Retry(
             total=extra_config.get("max_retries", 3),
             backoff_factor=extra_config.get("backoff_factor", 0.3),
             status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["HEAD", "GET", "PUT", "POST", "DELETE", "OPTIONS", "TRACE"],
+            allowed_methods=["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE"],
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
 
-        # Set default timeout
-        session.timeout = extra_config.get("timeout", 30)
+        self.timeout = extra_config.get("timeout", self.DEFAULT_TIMEOUT)
 
         return session
 
@@ -88,12 +100,22 @@ class TelomereHook(BaseHook):
         self,
         method: str,
         endpoint: str,
-        data: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None,
-        headers: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, Any]:
-        """Make a request to the Telomere API."""
-        url = urljoin(self.BASE_URL, endpoint.lstrip("/"))
+        data: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        ok_404: bool = False,
+    ) -> dict[str, Any] | None:
+        """
+        Make a request to the Telomere API.
+
+        :param method: HTTP method
+        :param endpoint: API endpoint (starting with /)
+        :param data: JSON body
+        :param params: Query parameters
+        :param ok_404: If True, return None on 404 instead of raising
+        :return: Parsed JSON response ({} for 204 No Content), or None on 404
+            when ``ok_404`` is set
+        """
+        url = f"{self.BASE_URL}{endpoint}"
 
         try:
             response = self.session.request(
@@ -101,9 +123,10 @@ class TelomereHook(BaseHook):
                 url=url,
                 json=data,
                 params=params,
-                headers=headers,
-                timeout=self.session.timeout,
+                timeout=self.timeout,
             )
+            if ok_404 and response.status_code == 404:
+                return None
             response.raise_for_status()
 
             # Return empty dict for 204 No Content
@@ -116,24 +139,23 @@ class TelomereHook(BaseHook):
         except requests.exceptions.Timeout as e:
             raise TelomereConnectionError(f"Request to Telomere timed out: {e}")
         except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response is not None else None
             error_msg = f"HTTP error from Telomere: {e}"
             try:
                 error_detail = e.response.json()
                 if "error" in error_detail:
                     error_msg = f"Telomere API error: {error_detail['error']}"
-            except:
+            except (ValueError, AttributeError):
                 pass
-            raise AirflowException(error_msg)
-        except Exception as e:
-            raise AirflowException(f"Unexpected error calling Telomere: {e}")
+            raise TelomereApiError(error_msg, status_code=status_code)
 
     def ensure_lifecycle(
         self,
         name: str,
         default_timeout_seconds: int = 3600,
-        description: Optional[str] = None,
-        default_tags: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, Any]:
+        description: str | None = None,
+        default_tags: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """
         Create or get existing lifecycle.
 
@@ -143,28 +165,13 @@ class TelomereHook(BaseHook):
         :param default_tags: Optional default tags
         :return: Lifecycle details
         """
-        # First try to get existing lifecycle
-        try:
-            response = self.session.get(
-                urljoin(self.BASE_URL, f"/api/lifecycles/{name}"),
-                timeout=self.session.timeout,
-            )
+        existing = self._request("GET", f"/api/lifecycles/{name}", ok_404=True)
+        if existing is not None:
+            self.log.info("Found existing lifecycle: %s", name)
+            return existing
 
-            if response.status_code == 404:
-                # Lifecycle doesn't exist, create it
-                self.log.info(f"Lifecycle '{name}' not found, creating new lifecycle")
-            else:
-                response.raise_for_status()
-                self.log.info(f"Found existing lifecycle: {name}")
-                return response.json()
-
-        except requests.exceptions.HTTPError as e:
-            raise AirflowException(f"Error checking lifecycle existence: {e}")
-        except Exception as e:
-            raise AirflowException(f"Unexpected error checking lifecycle: {e}")
-
-        # Create the lifecycle
-        data = {
+        self.log.info("Lifecycle '%s' not found, creating new lifecycle", name)
+        data: dict[str, Any] = {
             "name": name,
             "defaultTimeoutSeconds": default_timeout_seconds,
         }
@@ -174,30 +181,28 @@ class TelomereHook(BaseHook):
             data["defaultTags"] = default_tags
 
         try:
-            return self._request("POST", "/api/lifecycles", data=data)
-        except AirflowException as e:
-            # Check if it's a conflict error (lifecycle already exists)
-            # The error message contains the response details
-            if "CONFLICT" in str(e) or "already exists" in str(e):
-                self.log.info(f"Lifecycle '{name}' was created by another process, fetching existing lifecycle")
-                # Try to get the lifecycle again
-                response = self.session.get(
-                    urljoin(self.BASE_URL, f"/api/lifecycles/{name}"),
-                    timeout=self.session.timeout,
+            result = self._request("POST", "/api/lifecycles", data=data)
+            assert result is not None
+            return result
+        except TelomereApiError as e:
+            if e.status_code == 409:
+                # Lifecycle was created concurrently; fetch it
+                self.log.info(
+                    "Lifecycle '%s' was created by another process, fetching existing lifecycle",
+                    name,
                 )
-                response.raise_for_status()
-                return response.json()
-            else:
-                # Re-raise for other errors
-                raise
+                created = self._request("GET", f"/api/lifecycles/{name}")
+                assert created is not None
+                return created
+            raise
 
     def start_run(
         self,
         lifecycle_name: str,
-        timeout_seconds: Optional[int] = None,
-        tags: Optional[Dict[str, str]] = None,
-        url: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        timeout_seconds: int | None = None,
+        tags: dict[str, str] | None = None,
+        url: str | None = None,
+    ) -> dict[str, Any]:
         """
         Start a new run for a lifecycle.
 
@@ -207,7 +212,7 @@ class TelomereHook(BaseHook):
         :param url: Optional URL for this run
         :return: Run details
         """
-        data = {}
+        data: dict[str, Any] = {}
         if timeout_seconds is not None:
             data["timeoutSeconds"] = timeout_seconds
         if tags:
@@ -215,52 +220,70 @@ class TelomereHook(BaseHook):
         if url:
             data["url"] = url
 
-        return self._request("POST", f"/api/lifecycles/{lifecycle_name}/runs", data=data)
+        result = self._request("POST", f"/api/lifecycles/{lifecycle_name}/runs", data=data)
+        assert result is not None
+        return result
 
-    def end_run(self, run_id: str, message: Optional[str] = None) -> Dict[str, Any]:
+    def end_run(self, run_id: str, message: str | None = None) -> dict[str, Any]:
         """
         Mark run as completed.
 
+        A 409 (run already ended) is treated as success so that retried
+        finalize tasks stay idempotent.
+
         :param run_id: ID of the run
         :param message: Optional completion message
-        :return: Updated run details
+        :return: Updated run details ({} if the run was already ended)
         """
-        data = {}
-        if message:
-            data["message"] = message
-        return self._request("POST", f"/api/runs/{run_id}/end", data=data)
+        return self._resolve_run(run_id, "end", message)
 
-    def fail_run(self, run_id: str, message: Optional[str] = None) -> Dict[str, Any]:
+    def fail_run(self, run_id: str, message: str | None = None) -> dict[str, Any]:
         """
         Mark run as failed.
 
+        A 409 (run already ended) is treated as success so that retried
+        finalize tasks stay idempotent.
+
         :param run_id: ID of the run
         :param message: Optional failure message
-        :return: Updated run details
+        :return: Updated run details ({} if the run was already ended)
         """
+        return self._resolve_run(run_id, "fail", message)
+
+    def _resolve_run(self, run_id: str, action: str, message: str | None) -> dict[str, Any]:
+        """POST /api/runs/{id}/{action}, treating 409 (already ended) as success."""
         data = {}
         if message:
             data["message"] = message
+        try:
+            result = self._request("POST", f"/api/runs/{run_id}/{action}", data=data)
+            assert result is not None
+            return result
+        except TelomereApiError as e:
+            if e.status_code == 409:
+                self.log.info("Run %s already ended; treating %s as success", run_id, action)
+                return {}
+            raise
 
-        return self._request("POST", f"/api/runs/{run_id}/fail", data=data)
-
-    def get_run(self, run_id: str) -> Dict[str, Any]:
+    def get_run(self, run_id: str) -> dict[str, Any]:
         """
         Get run details.
 
         :param run_id: ID of the run
         :return: Run details
         """
-        return self._request("GET", f"/api/runs/{run_id}")
+        result = self._request("GET", f"/api/runs/{run_id}")
+        assert result is not None
+        return result
 
     def respawn(
         self,
         lifecycle_name: str,
-        timeout_seconds: Optional[int] = None,
-        tags: Optional[Dict[str, str]] = None,
-        url: Optional[str] = None,
+        timeout_seconds: int | None = None,
+        tags: dict[str, str] | None = None,
+        url: str | None = None,
         previous_run_resolution: str = "complete",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Atomically complete any running runs and start a new run.
 
@@ -271,7 +294,7 @@ class TelomereHook(BaseHook):
         :param previous_run_resolution: How to resolve previous runs (complete/fail/timeout)
         :return: Response containing previous and new run details
         """
-        data = {"previousRunResolution": previous_run_resolution}
+        data: dict[str, Any] = {"previousRunResolution": previous_run_resolution}
         if timeout_seconds is not None:
             data["timeoutSeconds"] = timeout_seconds
         if tags:
@@ -279,9 +302,11 @@ class TelomereHook(BaseHook):
         if url:
             data["url"] = url
 
-        return self._request("POST", f"/api/lifecycles/{lifecycle_name}/respawn", data=data)
+        result = self._request("POST", f"/api/lifecycles/{lifecycle_name}/respawn", data=data)
+        assert result is not None
+        return result
 
-    def unspawn(self, lifecycle_name: str, resolution: str = "complete") -> Dict[str, Any]:
+    def unspawn(self, lifecycle_name: str, resolution: str = "complete") -> dict[str, Any]:
         """
         Complete all running runs without starting a new one.
 
@@ -289,68 +314,29 @@ class TelomereHook(BaseHook):
         :param resolution: How to resolve running runs (complete/fail/timeout)
         :return: Details of ended runs
         """
-        # First check if the lifecycle exists
-        try:
-            response = self.session.get(
-                urljoin(self.BASE_URL, f"/api/lifecycles/{lifecycle_name}"),
-                timeout=self.session.timeout,
-            )
+        existing = self._request("GET", f"/api/lifecycles/{lifecycle_name}", ok_404=True)
+        if existing is None:
+            self.log.info("Lifecycle '%s' not found, skipping unspawn", lifecycle_name)
+            return {"endedRuns": []}
 
-            if response.status_code == 404:
-                # Lifecycle doesn't exist, nothing to unspawn
-                self.log.info(f"Lifecycle '{lifecycle_name}' not found, skipping unspawn")
-                return {"endedRuns": []}
-
-            response.raise_for_status()
-
-        except requests.exceptions.HTTPError as e:
-            raise AirflowException(f"Error checking lifecycle existence: {e}")
-        except Exception as e:
-            raise AirflowException(f"Unexpected error checking lifecycle: {e}")
-
-        # Lifecycle exists, proceed with unspawn
-        return self._request(
+        result = self._request(
             "POST",
             f"/api/lifecycles/{lifecycle_name}/unspawn",
-            data={"resolution": resolution}
+            data={"resolution": resolution},
         )
+        assert result is not None
+        return result
 
     def test_connection(self) -> tuple[bool, str]:
         """Test Telomere connection."""
         try:
-            # Try to list lifecycles to test connection
             self._request("GET", "/api/lifecycles", params={"pageSize": 1})
             return True, "Connection successful"
         except Exception as e:
             return False, str(e)
 
     @staticmethod
-    def get_connection_form_widgets() -> Dict[str, Any]:
-        """Return connection widgets to add to Airflow connection form."""
-        from flask_appbuilder.fieldwidgets import BS3PasswordFieldWidget
-        from flask_babel import lazy_gettext
-        from wtforms import PasswordField, IntegerField
-        from wtforms.validators import Optional
-
-        return {
-            "password": PasswordField(
-                lazy_gettext("API Key"),
-                widget=BS3PasswordFieldWidget(),
-            ),
-            "extra__telomere__timeout": IntegerField(
-                lazy_gettext("Request Timeout (seconds)"),
-                validators=[Optional()],
-                default=30,
-            ),
-            "extra__telomere__max_retries": IntegerField(
-                lazy_gettext("Max Retries"),
-                validators=[Optional()],
-                default=3,
-            ),
-        }
-
-    @staticmethod
-    def get_ui_field_behaviour() -> Dict[str, Any]:
+    def get_ui_field_behaviour() -> dict[str, Any]:
         """Return custom UI field behaviour for Telomere connection."""
         return {
             "hidden_fields": ["schema", "login", "port", "host", "extra"],
