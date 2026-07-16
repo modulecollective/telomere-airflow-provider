@@ -145,7 +145,10 @@ class TestExecution:
     def test_execution_timeout_reports_fail_run(self, hook):
         # Row 19: AirflowTaskTimeout inherits BaseException, not Exception —
         # it must still be reported as a failed run before propagating.
-        from airflow.sdk.exceptions import AirflowTaskTimeout
+        try:
+            from airflow.sdk.exceptions import AirflowTaskTimeout
+        except ImportError:  # Airflow 3.0.x
+            from airflow.exceptions import AirflowTaskTimeout
 
         def timeout():
             raise AirflowTaskTimeout("timed out")

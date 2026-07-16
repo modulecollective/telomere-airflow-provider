@@ -1,6 +1,7 @@
 """Tier 1: TelomereHook against a mocked HTTP layer (no Airflow runtime)."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 import requests
@@ -53,8 +54,12 @@ class TestSessionConfiguration:
         assert "GET" in adapter.max_retries.allowed_methods
 
     def test_invalid_extra_json_tolerated(self, monkeypatch):
-        monkeypatch.setenv("AIRFLOW_CONN_TELOMERE_BADEXTRA", "telomere://:key@?__extra__=notjson")
-        hook = TelomereHook("telomere_badextra")
+        # Stubbed connection: Airflow versions disagree on whether a non-JSON
+        # __extra__ URI even parses; what we care about is the hook shrugging
+        # off a non-JSON extra field.
+        conn = SimpleNamespace(password="key", extra="notjson")
+        hook = TelomereHook()
+        monkeypatch.setattr(hook, "get_connection", lambda conn_id: conn)
         assert hook.session.headers["Authorization"] == "Bearer key"
         assert hook.timeout == TelomereHook.DEFAULT_TIMEOUT
 

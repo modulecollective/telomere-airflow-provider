@@ -9,7 +9,11 @@ from typing import Any
 
 import requests
 from airflow.exceptions import AirflowException
-from airflow.sdk.bases.hook import BaseHook
+
+try:
+    from airflow.sdk.bases.hook import BaseHook
+except ImportError:  # Airflow 3.0.x, before airflow.sdk.bases existed
+    from airflow.hooks.base import BaseHook
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 

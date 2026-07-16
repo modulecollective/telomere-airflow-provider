@@ -26,11 +26,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Oldest supported floor and current stable
+          # Oldest supported floor and current stable. The floor leg installs
+          # with Airflow's official constraint file: unconstrained resolution
+          # pairs airflow 3.0 with providers/fastapi versions it never
+          # supported, and dag.test() breaks.
           - python: "3.10"
-            airflow: "3.0.*"
+            airflow: "3.0.6"
+            constraints: "https://raw.githubusercontent.com/apache/airflow/constraints-3.0.6/constraints-3.10.txt"
           - python: "3.13"
             airflow: "3.3.*"
+            constraints: ""
     name: "tests (py${{ matrix.python }} / airflow ${{ matrix.airflow }})"
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +48,12 @@ jobs:
       - name: Install provider + pinned Airflow
         run: |
           uv venv
-          uv pip install -e . --group dev "apache-airflow==${{ matrix.airflow }}"
+          if [ -n "${{ matrix.constraints }}" ]; then
+            curl -sL -o /tmp/constraints.txt "${{ matrix.constraints }}"
+            uv pip install -e . --group dev "apache-airflow==${{ matrix.airflow }}" -c /tmp/constraints.txt
+          else
+            uv pip install -e . --group dev "apache-airflow==${{ matrix.airflow }}"
+          fi
 
       - name: Unit + failure-mode matrix (tiers 1 and 2)
         run: uv run pytest -v
