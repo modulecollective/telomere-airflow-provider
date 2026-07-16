@@ -89,10 +89,10 @@ with DAG("matrix_all_skipped", schedule=None) as dag_all_skipped:
 track(dag_all_skipped)
 
 
-# Row 5b (documented edge): a default ShortCircuitOperator force-skips ALL
-# downstream tasks, trigger rules ignored — including the injected canary and
-# finalize. Nothing is reported and the Telomere run rides to its timeout: a
-# noisy alert for a successful Airflow run, but never a false "completed".
+# Row 5b: a default ShortCircuitOperator force-skips ALL downstream tasks,
+# trigger rules ignored — but teardowns are exempt, which is exactly why the
+# injected canary and finalize are teardowns. The canary still runs and the
+# run is reported completed, mirroring Airflow's own success verdict.
 with DAG("matrix_force_skip", schedule=None) as dag_force_skip:
     sc = ShortCircuitOperator(task_id="sc", python_callable=lambda: False)
     t = PythonOperator(task_id="t", python_callable=ok)

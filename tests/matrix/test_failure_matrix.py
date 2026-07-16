@@ -1,7 +1,7 @@
 """
 Tier 2: the failure-mode matrix, end to end through Airflow's own machinery.
 
-Each test is one row of the matrix in the README: build the row's DAG shape,
+Each test is one row of the failure-mode matrix: build the row's DAG shape,
 induce the row's failure, run it through dag.test() (real trigger-rule
 engine, real skip propagation, real retries — only the Telomere HTTP layer is
 faked), and assert the exact Telomere resolutions AND that they mirror
