@@ -1,4 +1,4 @@
-FROM apache/airflow:2.8.0-python3.11
+FROM apache/airflow:3.3.0
 
 # Copy the package source as airflow user
 COPY --chown=airflow:root . /opt/telomere-provider/
