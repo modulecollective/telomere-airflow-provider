@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dev environment (locked)
+        run: uv sync --frozen
+
+      - name: Ruff
+        run: uv run ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest supported floor and current stable
+          - python: "3.10"
+            airflow: "3.0.*"
+          - python: "3.13"
+            airflow: "3.3.*"
+    name: "tests (py${{ matrix.python }} / airflow ${{ matrix.airflow }})"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install provider + pinned Airflow
+        run: |
+          uv venv
+          uv pip install -e . --group dev "apache-airflow==${{ matrix.airflow }}"
+
+      - name: Unit + failure-mode matrix (tiers 1 and 2)
+        run: uv run pytest -v
+
+  e2e:
+    # Real scheduler + real Telomere API. Uses the repo-provisioned
+    # TELOMERE_API_KEY secret, which fork PRs don't get — hence push-only.
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    env:
+      TELOMERE_API_KEY: ${{ secrets.TELOMERE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install e2e test deps
+        run: |
+          uv venv
+          uv pip install pytest requests
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Run e2e suite (tier 3)
+        # run.sh dumps compose logs itself on failure before tearing down
+        run: tests/e2e/run.sh

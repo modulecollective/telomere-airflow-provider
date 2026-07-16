@@ -7,13 +7,18 @@ at import time.
 """
 
 import os
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
 
 # Version-scoped home so a cached metadata DB never outlives a schema change.
-_airflow_version = version("apache-airflow")
+# The e2e tier runs without airflow installed (it drives the compose stack
+# over HTTP only) — any placeholder version is fine there.
+try:
+    _airflow_version = version("apache-airflow")
+except PackageNotFoundError:
+    _airflow_version = "none"
 _tmp = Path(os.environ.get("TMPDIR") or "/tmp")
 _airflow_home = _tmp / f"telomere-provider-tests-airflow-{_airflow_version}"
 
