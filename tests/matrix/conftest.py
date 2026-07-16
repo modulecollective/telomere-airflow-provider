@@ -55,7 +55,7 @@ class FakeTelomere:
     def _resolve_run(self, request, context):
         action, run_id = self._parse_resolution(request.path)
         self._resolved.append((action, run_id))
-        return {"state": "completed" if action == "end" else "failed"}
+        return {"status": "completed" if action == "end" else "failed"}
 
     @staticmethod
     def _parse_resolution(path):

@@ -85,8 +85,9 @@ class TelomereHook(BaseHook):
 
         # Set up retries. POST is deliberately not retried at this layer: a POST
         # that reached the server but returned 5xx could otherwise be replayed
-        # and double-start runs. Callers handle idempotency instead (409 on
-        # end/fail is treated as success).
+        # and double-start runs. Callers handle idempotency instead (retried
+        # end/fail is safe: the server re-resolves with 200, and a 409 would
+        # be treated as success).
         retry_strategy = Retry(
             total=extra_config.get("max_retries", 3),
             backoff_factor=extra_config.get("backoff_factor", 0.3),
@@ -232,12 +233,15 @@ class TelomereHook(BaseHook):
         """
         Mark run as completed.
 
-        A 409 (run already ended) is treated as success so that retried
-        finalize tasks stay idempotent.
+        The current server resolves runs unconditionally: end on an
+        already-ended run returns 200 and overwrites the prior resolution.
+        A 409 is nevertheless treated as success, because the documented
+        contract is that only running runs can be ended — if the server
+        ever enforces that, retried finalize tasks must stay idempotent.
 
         :param run_id: ID of the run
         :param message: Optional completion message
-        :return: Updated run details ({} if the run was already ended)
+        :return: Updated run details ({} on a tolerated 409)
         """
         return self._resolve_run(run_id, "end", message)
 
@@ -245,17 +249,25 @@ class TelomereHook(BaseHook):
         """
         Mark run as failed.
 
-        A 409 (run already ended) is treated as success so that retried
-        finalize tasks stay idempotent.
+        The current server resolves runs unconditionally: fail on an
+        already-ended run returns 200 and overwrites the prior resolution.
+        A 409 is nevertheless treated as success, because the documented
+        contract is that only running runs can be failed — if the server
+        ever enforces that, retried finalize tasks must stay idempotent.
 
         :param run_id: ID of the run
         :param message: Optional failure message
-        :return: Updated run details ({} if the run was already ended)
+        :return: Updated run details ({} on a tolerated 409)
         """
         return self._resolve_run(run_id, "fail", message)
 
     def _resolve_run(self, run_id: str, action: str, message: str | None) -> dict[str, Any]:
-        """POST /api/runs/{id}/{action}, treating 409 (already ended) as success."""
+        """POST /api/runs/{id}/{action}; a 409 is tolerated as success.
+
+        Today's server re-resolves ended runs with 200 (no status guard), so
+        the 409 branch is insurance for the documented running-only contract,
+        should enforcement ever land upstream.
+        """
         data = {}
         if message:
             data["message"] = message

@@ -164,7 +164,9 @@ class TestRuns:
 
     @pytest.mark.parametrize("action", ["end", "fail"])
     def test_resolve_run_already_ended_409_is_success(self, hook, requests_mock, action):
-        # Finalize retries may call end/fail twice; the second must not raise.
+        # Today's server re-resolves ended runs with 200, but the documented
+        # contract is running-only; if enforcement ever lands as a 409,
+        # retried finalizes must still not raise.
         requests_mock.post(
             f"{BASE}/api/runs/r1/{action}", status_code=409, json={"error": "already ended"}
         )
@@ -179,8 +181,8 @@ class TestRuns:
             method("r1")
 
     def test_get_run(self, hook, requests_mock):
-        requests_mock.get(f"{BASE}/api/runs/r1", json={"id": "r1", "state": "running"})
-        assert hook.get_run("r1")["state"] == "running"
+        requests_mock.get(f"{BASE}/api/runs/r1", json={"id": "r1", "status": "running"})
+        assert hook.get_run("r1")["status"] == "running"
 
     def test_respawn(self, hook, requests_mock):
         post = requests_mock.post(f"{BASE}/api/lifecycles/foo/respawn", json={"id": "r2"})
