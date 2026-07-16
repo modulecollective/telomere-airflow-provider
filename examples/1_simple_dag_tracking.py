@@ -7,16 +7,17 @@ DAGs without modifying task code.
 """
 
 from datetime import datetime, timedelta
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.operators.bash import BashOperator
+
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import DAG
+
 from telomere_provider.utils import enable_telomere_tracking
 
 # Standard DAG setup
 default_args = {
     "owner": "data-team",
     "depends_on_past": False,
-    "start_date": datetime(2024, 1, 1),
     "email_on_failure": False,
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
@@ -27,10 +28,12 @@ dag = DAG(
     "simple_dag_tracking",
     default_args=default_args,
     description="Generate daily customer analytics report",
-    schedule_interval="0 2 * * *",  # Daily at 2 AM
+    schedule="0 2 * * *",  # Daily at 2 AM
+    start_date=datetime(2026, 1, 1),
     catchup=False,
     tags=["analytics", "daily"],
 )
+
 
 # Existing tasks - no changes needed
 def extract_customer_data():
@@ -39,6 +42,7 @@ def extract_customer_data():
     # Your existing extraction logic
     return {"customer_count": 15000}
 
+
 def generate_report(**kwargs):
     """Generate analytics report."""
     ti = kwargs["ti"]
@@ -46,10 +50,6 @@ def generate_report(**kwargs):
     print(f"Generating report for {data['customer_count']} customers...")
     # Your existing report generation logic
 
-def send_report():
-    """Send report to stakeholders."""
-    print("Sending report via email...")
-    # Your existing email logic
 
 # Standard task definitions
 extract = PythonOperator(
@@ -83,9 +83,11 @@ enable_telomere_tracking(
 
 # That's it! Telomere will now:
 # 1. Create "simple_dag_tracking.customer_report.dag" lifecycle
-#    - Tracks each DAG run with 2-hour timeout
-#    - Alerts if DAG fails or times out
+#    - Every run is created with a timeout up front, so even a run that
+#      dies without a trace (killed workers, dagrun_timeout) raises an alert
+#    - The run is reported completed or failed the moment it finishes,
+#      mirroring Airflow's own final state — including mid-graph failures
 # 2. Create "simple_dag_tracking.customer_report.schedule" lifecycle
 #    - Uses respawn pattern to monitor schedule compliance
-#    - Alerts if next run doesn't start by ~2:05 AM (2h + 5min grace)
+#    - Alerts if the next run doesn't start on time (+5 min grace)
 # 3. Send alerts via webhooks, email, or integrations you configure in Telomere

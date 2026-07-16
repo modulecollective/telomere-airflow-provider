@@ -13,6 +13,36 @@ Comprehensive Apache Airflow provider for [Telomere](https://telomere.modulecoll
 
 Learn more and get started at [telomere.modulecollective.com](https://telomere.modulecollective.com).
 
+## The tracking guarantee
+
+The provider is built around one invariant:
+
+> **Telomere never reports "completed" for a DAG run whose Airflow final state
+> is failed. Any condition that prevents explicit reporting degrades to a
+> Telomere timeout — an alert — never to a false success or to silence.**
+
+Two layers deliver it:
+
+1. **Explicit reporting (fast).** Tasks injected into your DAG report
+   completed/failed the moment the run reaches its final state, mirroring
+   Airflow's own verdict — including mid-graph failures, branch skips,
+   dynamic-mapped tasks, and runs recovered by `all_done` fallback leaves.
+2. **The timeout net (guaranteed).** Every Telomere run is created *with a
+   timeout* at start. If explicit reporting never happens — killed workers,
+   `dagrun_timeout`, a Telomere outage mid-run — the run times out server-side
+   and alerts. For scheduled DAGs, a separate `.schedule` lifecycle acts as a
+   deadman switch for runs that never start at all.
+
+Known edges, documented honestly:
+
+- A **manually triggered** run of a DAG with no schedule lifecycle, where the
+  Telomere API is unreachable at run start, leaves no record to alert on. A
+  push-based tracker cannot alert on a run it never heard about. Scheduled
+  DAGs don't have this gap — the previous `.schedule` deadline still fires.
+- If you **clear and re-run** the start task of an already-tracked run, the
+  original Telomere run is orphaned and will raise a timeout alert (noise,
+  not a miss); the re-run is tracked normally.
+
 ## Features
 
 - 📊 **DAG-Level Tracking**: Monitor entire DAG execution lifecycles
@@ -21,13 +51,16 @@ Learn more and get started at [telomere.modulecollective.com](https://telomere.m
 - 🔧 **Zero-Code Integration**: Enable tracking without modifying existing DAGs
 - 🎯 **Flexible Configuration**: Dynamic lifecycle names, tags, and timeouts
 - 🚨 **Intelligent Alerts**: Leverage Telomere's webhook and email notifications
-- 🔄 **Automatic Retries**: Built-in retry logic with exponential backoff
 
 ## Installation
 
 ```bash
 pip install telomere-airflow-provider
 ```
+
+Requires Apache Airflow >= 3.0 and Python >= 3.10. (Airflow 2 users: pin
+`telomere-airflow-provider==0.0.1`, which supports Airflow 2.5–2.x — note that
+the Airflow 2 series is EOL.)
 
 ## Quick Start
 
@@ -51,12 +84,12 @@ airflow connections add telomere_default \
 
 **Via Environment Variable:**
 ```bash
-export AIRFLOW_CONN_TELOMERE_DEFAULT='telomere://YOUR_API_KEY@'
+export AIRFLOW_CONN_TELOMERE_DEFAULT='telomere://:YOUR_API_KEY@'
 ```
 
 ### 2. Track Your DAGs
 
-#### Option A: Zero-Code Integration
+#### Option A: Zero-Code DAG Tracking
 
 Enable Telomere tracking on existing DAGs without code changes:
 
@@ -66,33 +99,29 @@ from telomere_provider.utils import enable_telomere_tracking
 # Your existing DAG
 dag = DAG("my_existing_dag", ...)
 
-# Enable tracking with one line!
+# ... existing tasks ...
+
+# Enable tracking with one line (after all tasks are added)
 enable_telomere_tracking(dag)
 ```
 
-#### Option B: DAG-Level Operators
+This injects three tasks around your graph:
 
-Track entire DAG execution:
-
-```python
-from telomere_provider.operators.dag import (
-    TelomereDAGStartOperator,
-    TelomereDAGEndOperator
-)
-
-with DAG("my_dag", ...) as dag:
-    start = TelomereDAGStartOperator(task_id="telomere_start")
-
-    # Your tasks here
-    task1 = PythonOperator(...)
-    task2 = BashOperator(...)
-
-    end = TelomereDAGEndOperator(task_id="telomere_end")
-
-    start >> [task1, task2] >> end
+```
+telomere_dag_start >> [your roots]; [your leaves] >> telomere_canary >> telomere_finalize
 ```
 
-#### Option C: Task-Level Tracking
+- `telomere_dag_start` creates the Telomere run — with its timeout, so the
+  timeout net is armed before your first task executes — and manages the
+  `.schedule` lifecycle for scheduled DAGs.
+- `telomere_canary` executes only if the dag run is succeeding (its
+  `none_failed` trigger rule over your leaves is exactly Airflow's dag-run
+  success predicate).
+- `telomere_finalize` always runs and reports completed or failed based on
+  the canary. Both downstream tasks are Airflow teardowns, so your own leaves
+  keep deciding the dag-run state exactly as before injection.
+
+#### Option B: Task-Level Tracking
 
 Track individual critical tasks:
 
@@ -109,110 +138,37 @@ critical_task = TelomereLifecycleOperator(
 )
 ```
 
+The wrapped task reports success/failure when it finishes, reports failure
+immediately when it is externally stopped (SIGTERM, UI mark-failed) via
+`on_kill`, and falls back to its run timeout when nothing can report (e.g.
+SIGKILL/OOM).
+
 ## How It Works
 
 ### Dual Lifecycle Approach for Scheduled DAGs
 
 The provider uses two separate lifecycles for comprehensive monitoring:
 
-1. **Execution Lifecycle** - Tracks individual DAG runs
-   - Monitors if each run completes within timeout
-   - Timeout defaults to schedule interval
+1. **Execution Lifecycle** (`<dag_id>.dag`) - Tracks individual DAG runs
+   - Every run is created with a timeout (defaults to the schedule interval)
+   - Reported completed/failed explicitly; times out server-side otherwise
 
-2. **Schedule Lifecycle** - Monitors schedule compliance
-   - Uses Telomere's respawn pattern
-   - Alerts if next run doesn't start on time
-   - Includes 5-minute grace period
+2. **Schedule Lifecycle** (`<dag_id>.schedule`) - Monitors schedule compliance
+   - Uses Telomere's respawn pattern: every run start completes the previous
+     schedule run and opens a new one whose deadline is the next expected run
+   - Alerts if the next run doesn't start on time (5-minute grace period)
+   - This is the deadman switch: it fires even if Airflow itself is down
 
 ### Example: Hourly DAG
 
 For a DAG scheduled to run every hour:
-- **Execution lifecycle** times out after 1 hour
-- **Schedule lifecycle** times out if next run doesn't start within 65 minutes
-
-This dual approach ensures you're alerted for both execution delays and scheduling issues.
-
-## Examples
-
-### Basic Task Tracking
-
-```python
-from telomere_provider.operators.telomere import TelomereLifecycleOperator
-
-# Track a critical task
-validate_task = TelomereLifecycleOperator(
-    task_id="validate_data",
-    python_callable=validate_data_batch,
-    lifecycle_name="data_validation",
-    timeout_seconds=300,
-    dag=dag
-)
-```
-
-### Automatic DAG Tracking
-
-Add Telomere tracking to existing DAGs:
-
-```python
-from telomere_provider.utils import enable_telomere_tracking
-
-# Your existing DAG
-dag = DAG("my_dag", ...)
-
-# ... existing tasks ...
-
-# Enable DAG-level lifecycle tracking
-enable_telomere_tracking(
-    dag,
-    track_schedule=True,  # Monitor schedule compliance
-    tags={"team": "data-eng"}
-)
-```
-
-### Monitor Critical Tasks
-
-```python
-from telomere_provider.operators.telomere import TelomereLifecycleOperator
-
-# Monitor payment processing with strict timeout
-payment_task = TelomereLifecycleOperator(
-    task_id="process_payments",
-    python_callable=process_payment_batch,
-    lifecycle_name="payment_processing",
-    timeout_seconds=300,  # Must complete in 5 minutes
-    tags={"priority": "critical", "team": "finance"},
-    fail_on_telomere_error=True,  # Fail task if monitoring fails
-    dag=dag,
-)
-```
-
-### Conditional Tracking
-
-```python
-from airflow.models import Variable
-
-if Variable.get("environment") == "production":
-    enable_telomere_tracking(
-        dag,
-        fail_on_telomere_error=True  # Fail DAG if Telomere unavailable
-    )
-```
-
-### Environment-Based Configuration
-
-```python
-# Only enable in production
-if Variable.get("environment", "dev") == "production":
-    enable_telomere_tracking(
-        dag,
-        tags={"env": "production"},
-        fail_on_telomere_error=True
-    )
-```
+- **Execution lifecycle** times out if a run takes more than 1 hour
+- **Schedule lifecycle** times out if the next run hasn't started 65 minutes
+  after the last one
 
 ## Advanced Features
 
-### Dynamic Lifecycle Names
+### Dynamic Lifecycle Names (task-level operator)
 
 ```python
 def get_lifecycle_name(**context):
@@ -264,9 +220,13 @@ validation = TelomereLifecycleOperator(
 }
 ```
 
+Note: retries apply to read requests only. Writes (starting/ending runs) are
+never replayed automatically — a replayed `start_run` would double-start runs.
+
 ### Error Handling
 
-By default, Telomere failures don't fail your tasks. To change this:
+By default, Telomere failures don't fail your tasks — a monitoring outage
+degrades to the timeout net instead of blocking your pipeline. To change this:
 
 ```python
 # Fail task if Telomere is unavailable
@@ -285,9 +245,13 @@ task = TelomereLifecycleOperator(
 ### Operators
 
 - `TelomereLifecycleOperator`: Track task execution
-- `TelomereDAGStartOperator`: Start DAG tracking
-- `TelomereDAGEndOperator`: End DAG tracking
-- `TelomereDAGFailOperator`: Mark DAG as failed
+- `TelomereDAGStartOperator`: Start DAG tracking (injected by `enable_telomere_tracking`)
+- `TelomereCanaryOperator` / `TelomereFinalizeOperator`: Verdict + reporting
+  tasks injected by `enable_telomere_tracking`
+
+Upgrading from 0.0.1: `TelomereDAGEndOperator` and `TelomereDAGFailOperator`
+are gone — their leaf-based trigger rules missed mid-graph failures. Use
+`enable_telomere_tracking(dag)`, which handles every terminal shape.
 
 ### Utilities
 
@@ -295,9 +259,26 @@ task = TelomereLifecycleOperator(
 
 ## Development
 
-### Quick Start with Docker
+### Tests
 
-The easiest way to test the provider is using our Docker development environment:
+Three tiers, all run by CI (`.github/workflows/ci.yml`):
+
+```bash
+uv sync                  # install with the dev group
+uv run pytest            # tiers 1+2: unit + failure-mode matrix
+```
+
+The failure-mode matrix (`tests/matrix/`) is the heart of the suite: every
+way a DAG run can end — mid-graph failure, branch skips, all-skipped,
+recovery leaves, retries, mapped tasks, API outages at either end — runs
+through Airflow's real trigger-rule engine via `dag.test()` and asserts the
+exact Telomere calls. If you discover a new way for a run to end, add a row.
+
+```bash
+TELOMERE_API_KEY=... tests/e2e/run.sh   # tier 3: compose stack + real API
+```
+
+### Quick Start with Docker
 
 ```bash
 # Clone the repository
@@ -308,36 +289,19 @@ cd telomere-airflow-provider
 cp .env.example .env
 # Edit .env and add your TELOMERE_API_KEY
 
-# Start Airflow
+# Start Airflow (api-server, scheduler, dag-processor, postgres)
 docker compose up
 
 # Access Airflow at http://localhost:8080
 # Username: airflow, Password: airflow
 ```
 
-The Docker environment includes:
-- Apache Airflow with LocalExecutor
-- PostgreSQL database
-- All example DAGs pre-loaded
-- Live code reloading
-
 See [docker/README.md](docker/README.md) for detailed Docker instructions.
-
-### Manual Development
-
-1. Install in development mode:
-   ```bash
-   pip install -e .
-   ```
-
-2. Configure Telomere connection in Airflow
-
-3. Copy example DAGs to your Airflow DAGs folder
 
 ## Requirements
 
-- Apache Airflow >= 2.5.0, < 3.0.0
-- Python >= 3.8
+- Apache Airflow >= 3.0, < 4
+- Python >= 3.10
 - Telomere API key (get one at [telomere.modulecollective.com](https://telomere.modulecollective.com))
 
 ## Contributing

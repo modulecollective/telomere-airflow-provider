@@ -8,9 +8,11 @@ This example shows the recommended approach for production pipelines:
 """
 
 from datetime import datetime, timedelta
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.operators.bash import BashOperator
+
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import DAG
+
 from telomere_provider.operators.telomere import TelomereLifecycleOperator
 from telomere_provider.utils import enable_telomere_tracking
 
@@ -18,7 +20,6 @@ from telomere_provider.utils import enable_telomere_tracking
 default_args = {
     "owner": "data-team",
     "depends_on_past": False,
-    "start_date": datetime(2024, 1, 1),
     "email_on_failure": False,
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
@@ -28,10 +29,12 @@ dag = DAG(
     "best_practices",
     default_args=default_args,
     description="Production ETL pipeline with comprehensive monitoring",
-    schedule_interval="0 1 * * *",  # Daily at 1 AM
+    schedule="0 1 * * *",  # Daily at 1 AM
+    start_date=datetime(2026, 1, 1),
     catchup=False,
     tags=["production", "etl", "critical"],
 )
+
 
 # Setup tasks (not individually tracked)
 def check_dependencies():
@@ -40,18 +43,21 @@ def check_dependencies():
     # Verify data is ready
     return True
 
+
 dependency_check = PythonOperator(
     task_id="check_dependencies",
     python_callable=check_dependencies,
     dag=dag,
 )
 
+
 # Critical ETL operations (individually tracked)
 def extract_data(**kwargs):
     """Extract data from multiple sources - critical for downstream."""
-    print(f"Extracting data for {kwargs['ds']}")
+    print(f"Extracting data for run {kwargs['run_id']}")
     # Complex extraction logic
     return {"records": 2500000, "sources": 5}
+
 
 extract = TelomereLifecycleOperator(
     task_id="extract_data",
@@ -66,6 +72,7 @@ extract = TelomereLifecycleOperator(
     dag=dag,
 )
 
+
 def transform_data(**kwargs):
     """Apply business transformations - must complete for reporting."""
     ti = kwargs["ti"]
@@ -73,6 +80,7 @@ def transform_data(**kwargs):
     print(f"Transforming {data['records']} records...")
     # Complex transformation logic
     return {"transformed": data["records"] * 0.95}
+
 
 transform = TelomereLifecycleOperator(
     task_id="transform_data",
@@ -86,6 +94,7 @@ transform = TelomereLifecycleOperator(
     dag=dag,
 )
 
+
 # Regular task for loading (not individually tracked - covered by DAG tracking)
 def load_to_warehouse(**kwargs):
     """Load to data warehouse."""
@@ -93,11 +102,13 @@ def load_to_warehouse(**kwargs):
     data = ti.xcom_pull(task_ids="transform_data", key="return_value")
     print(f"Loading {data['transformed']} records to warehouse...")
 
+
 load = PythonOperator(
     task_id="load_to_warehouse",
     python_callable=load_to_warehouse,
     dag=dag,
 )
+
 
 # Data quality check (tracked - business critical)
 def quality_validation(**kwargs):
@@ -105,6 +116,7 @@ def quality_validation(**kwargs):
     print("Running data quality checks...")
     # Quality validation logic
     # This could raise an exception if quality fails
+
 
 quality_check = TelomereLifecycleOperator(
     task_id="data_quality_validation",
@@ -150,14 +162,17 @@ enable_telomere_tracking(
 
 # What this gives you:
 # 1. DAG-level monitoring in Telomere:
-#    - "best_practices.production_etl.dag" - tracks each pipeline run
-#    - "best_practices.production_etl.schedule" - monitors schedule compliance
-#    - Alerts if pipeline doesn't start by ~1:05 AM (24h + 5min grace period)
+#    - "best_practices.production_etl.dag" - tracks each pipeline run;
+#      failures anywhere in the graph are reported the moment the run
+#      finishes, and a run that dies without a trace still alerts via
+#      its timeout
+#    - "best_practices.production_etl.schedule" - monitors schedule
+#      compliance; alerts if the next run doesn't start on time
 #
 # 2. Task-level lifecycles for critical operations:
-#    - "best_practices.extract" - Alert if takes >1 hour or fails
-#    - "best_practices.transform" - Alert if takes >2 hours or fails
-#    - "best_practices.data_quality" - Alert if validation fails
+#    - "best_practices.etl_extraction" - Alert if takes >1 hour or fails
+#    - "best_practices.etl_transformation" - Alert if takes >2 hours or fails
+#    - "best_practices.data_quality_check" - Alert if validation fails
 #
 # 3. Configure alerts in Telomere:
 #    - Webhooks to PagerDuty/Slack for critical failures
