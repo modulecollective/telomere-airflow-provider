@@ -4,33 +4,52 @@ Utility for automatic DAG tracking with Telomere.
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from datetime import timedelta
 
-from airflow.models import DAG
+from airflow.sdk import DAG
 
 from telomere_provider.hooks.telomere import TelomereHook
 from telomere_provider.operators.dag import (
+    TelomereCanaryOperator,
     TelomereDAGStartOperator,
-    TelomereDAGEndOperator,
-    TelomereDAGFailOperator,
+    TelomereFinalizeOperator,
 )
+
+START_TASK_ID = "telomere_dag_start"
+CANARY_TASK_ID = "telomere_canary"
+FINALIZE_TASK_ID = "telomere_finalize"
+
+# Transient worker deaths on the injected tasks re-run them (Layer 1 stays
+# fast) instead of falling through to the Telomere run timeout (Layer 2).
+INJECTED_TASK_RETRIES = 2
+INJECTED_TASK_RETRY_DELAY = timedelta(seconds=30)
 
 
 def enable_telomere_tracking(
     dag: DAG,
-    lifecycle_name: Optional[str] = None,
+    lifecycle_name: str | None = None,
     track_schedule: bool = True,
-    timeout_seconds: Optional[int] = None,
-    tags: Optional[Dict[str, str]] = None,
+    timeout_seconds: int | None = None,
+    tags: dict[str, str] | None = None,
     telomere_conn_id: str = TelomereHook.default_conn_name,
     fail_on_telomere_error: bool = False,
 ) -> None:
     """
     Enable automatic Telomere tracking for a DAG with one line of code.
 
-    This function modifies the DAG by injecting Telomere lifecycle tracking
-    operators to track DAG execution lifecycle. Perfect for adding monitoring
-    to existing DAGs without rewriting them.
+    Injects three tasks::
+
+        telomere_dag_start >> [roots]; [leaves] >> telomere_canary >> telomere_finalize
+
+    The start task creates the Telomere run (whose timeout is the safety net if
+    nothing else ever reports). The canary, with ``trigger_rule="none_failed"``
+    over all leaves, executes iff the dag run is succeeding — a failure
+    anywhere in the graph (including mid-graph failures that only mark leaves
+    ``upstream_failed``) skips it. The finalize task always runs and reports
+    completed or failed based on the canary's marker XCom, mirroring Airflow's
+    own dag-run final state.
+
+    Call this *after* all tasks have been added to the DAG.
 
     :param dag: Airflow DAG instance
     :param lifecycle_name: Custom name (default: dag_id)
@@ -45,54 +64,63 @@ def enable_telomere_tracking(
         # ... existing tasks ...
         enable_telomere_tracking(dag)  # That's it!
     """
-    # Find root tasks (tasks with no upstream dependencies)
-    root_tasks = [task for task in dag.tasks if not task.upstream_task_ids]
+    injected_ids = {START_TASK_ID, CANARY_TASK_ID, FINALIZE_TASK_ID}
+    collisions = injected_ids.intersection(dag.task_ids)
+    if collisions:
+        raise ValueError(
+            f"DAG '{dag.dag_id}' already has task(s) {sorted(collisions)}; "
+            "was enable_telomere_tracking() called twice?"
+        )
 
-    # Find leaf tasks (tasks with no downstream dependencies)
+    # Roots and leaves of the user's graph, before injection
+    root_tasks = [task for task in dag.tasks if not task.upstream_task_ids]
     leaf_tasks = [task for task in dag.tasks if not task.downstream_task_ids]
 
     if not root_tasks or not leaf_tasks:
-        raise ValueError("DAG must have at least one root and one leaf task")
+        raise ValueError(
+            f"DAG '{dag.dag_id}' has no tasks; call enable_telomere_tracking() "
+            "after all tasks have been added"
+        )
 
-    # Store original tasks before we start modifying the DAG
-    # Used to find root and leaf tasks before adding telomere operators
-    original_tasks = list(dag.tasks)
-
-    # Create Telomere tracking operators
     with dag:
-        # Start operator
         telomere_start = TelomereDAGStartOperator(
-            task_id="telomere_dag_start",
+            task_id=START_TASK_ID,
             lifecycle_name=lifecycle_name,
             timeout_seconds=timeout_seconds,
             tags=tags,
+            track_schedule=track_schedule,
             telomere_conn_id=telomere_conn_id,
             fail_on_telomere_error=fail_on_telomere_error,
+            retries=INJECTED_TASK_RETRIES,
+            retry_delay=INJECTED_TASK_RETRY_DELAY,
         )
 
-        # End operator (for success)
-        telomere_end = TelomereDAGEndOperator(
-            task_id="telomere_dag_end",
+        # NOT an EmptyOperator: Airflow would optimize that to success without
+        # executing it, so the marker XCom would never exist.
+        telomere_canary = TelomereCanaryOperator(
+            task_id=CANARY_TASK_ID,
+            trigger_rule="none_failed",
+            retries=INJECTED_TASK_RETRIES,
+            retry_delay=INJECTED_TASK_RETRY_DELAY,
+        )
+
+        telomere_finalize = TelomereFinalizeOperator(
+            task_id=FINALIZE_TASK_ID,
+            start_task_id=START_TASK_ID,
+            canary_task_id=CANARY_TASK_ID,
             telomere_conn_id=telomere_conn_id,
             fail_on_telomere_error=fail_on_telomere_error,
-            trigger_rule="none_failed_or_skipped",
+            trigger_rule="all_done",
+            retries=INJECTED_TASK_RETRIES,
+            retry_delay=INJECTED_TASK_RETRY_DELAY,
         )
 
-        # Fail operator (for failures)
-        telomere_fail = TelomereDAGFailOperator(
-            task_id="telomere_dag_fail",
-            telomere_conn_id=telomere_conn_id,
-            fail_on_telomere_error=fail_on_telomere_error,
-            trigger_rule="one_failed",
-        )
-
-        # Wire up dependencies
-        # Start tracking before any root tasks
         telomere_start >> root_tasks
+        leaf_tasks >> telomere_canary >> telomere_finalize
 
-        # End tracking after all leaf tasks succeed
-        leaf_tasks >> telomere_end
-
-        # For failure tracking, connect leaf tasks directly to fail operator
-        # This will trigger if any upstream task failed
-        leaf_tasks >> telomere_fail
+        # Teardown: the finalize task must always run (all_done) yet must not
+        # decide the Airflow dag-run state — otherwise a swallowed Telomere
+        # error on the sole leaf would mark every dag run successful. As a
+        # teardown it is ignored for run-state purposes; the canary (whose
+        # none_failed verdict mirrors the leaves) decides instead.
+        telomere_finalize.as_teardown()

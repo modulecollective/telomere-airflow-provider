@@ -4,12 +4,12 @@ Telomere operator for task-level lifecycle tracking.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable
 
-from airflow.models import BaseOperator
-from airflow.utils.context import Context
+from airflow.sdk import BaseOperator, Context
 
 from telomere_provider.hooks.telomere import TelomereHook
+from telomere_provider.utils.urls import build_airflow_url
 
 
 class TelomereLifecycleOperator(BaseOperator):
@@ -46,15 +46,15 @@ class TelomereLifecycleOperator(BaseOperator):
 
     def __init__(
         self,
-        lifecycle_name: Optional[Union[str, Callable]] = None,
-        timeout_seconds: Optional[Union[int, Callable]] = None,
-        tags: Optional[Union[Dict[str, str], Callable]] = None,
+        lifecycle_name: str | Callable | None = None,
+        timeout_seconds: int | Callable | None = None,
+        tags: dict[str, str] | Callable | None = None,
         telomere_conn_id: str = TelomereHook.default_conn_name,
         fail_on_telomere_error: bool = False,
-        python_callable: Optional[Callable] = None,
-        op_args: Optional[list] = None,
-        op_kwargs: Optional[dict] = None,
-        **kwargs,
+        python_callable: Callable | None = None,
+        op_args: list | None = None,
+        op_kwargs: dict | None = None,
+        **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.lifecycle_name = lifecycle_name
@@ -65,11 +65,11 @@ class TelomereLifecycleOperator(BaseOperator):
         self.python_callable = python_callable
         self.op_args = op_args or []
         self.op_kwargs = op_kwargs or {}
-        self._run_id: Optional[str] = None
+        self._run_id: str | None = None
 
     def _get_lifecycle_name(self, context: Context) -> str:
         """Get the lifecycle name, evaluating callable if needed."""
-        dag_id = context['dag'].dag_id
+        dag_id = context["dag"].dag_id
 
         if self.lifecycle_name is None:
             # Default to dag_id.task_id
@@ -95,13 +95,13 @@ class TelomereLifecycleOperator(BaseOperator):
 
         # Try to get from task configuration
         task = context["task"]
-        if hasattr(task, "execution_timeout") and task.execution_timeout:
+        if getattr(task, "execution_timeout", None):
             return int(task.execution_timeout.total_seconds())
 
         # Default to 1 hour
         return 3600
 
-    def _get_tags(self, context: Context) -> Dict[str, str]:
+    def _get_tags(self, context: Context) -> dict[str, str]:
         """Get tags, evaluating callable if needed."""
         base_tags = {
             "dag_id": context["dag"].dag_id,
@@ -119,22 +119,6 @@ class TelomereLifecycleOperator(BaseOperator):
 
         return base_tags
 
-    def _get_url(self, context: Context) -> Optional[str]:
-        """Get URL for the Airflow task instance."""
-        try:
-            # Try to construct Airflow UI URL
-            from airflow.configuration import conf
-            webserver_base_url = conf.get("webserver", "base_url", fallback=None)
-            if webserver_base_url:
-                ti = context["ti"]
-                return (
-                    f"{webserver_base_url}/dags/{ti.dag_id}/grid"
-                    f"?dag_run_id={ti.run_id}&task_id={ti.task_id}"
-                )
-        except:
-            pass
-        return None
-
     def _start_telomere_run(self, context: Context) -> None:
         """Start Telomere run for this task."""
         try:
@@ -143,7 +127,8 @@ class TelomereLifecycleOperator(BaseOperator):
             lifecycle_name = self._get_lifecycle_name(context)
             timeout_seconds = self._get_timeout_seconds(context)
             tags = self._get_tags(context)
-            url = self._get_url(context)
+            ti = context["ti"]
+            url = build_airflow_url(ti.dag_id, ti.run_id, task_id=ti.task_id)
 
             # Ensure lifecycle exists
             hook.ensure_lifecycle(
@@ -161,14 +146,16 @@ class TelomereLifecycleOperator(BaseOperator):
             )
 
             self._run_id = run["id"]
-            self.log.info(f"Started Telomere run {self._run_id} for lifecycle {lifecycle_name}")
+            self.log.info("Started Telomere run %s for lifecycle %s", self._run_id, lifecycle_name)
 
         except Exception as e:
-            self.log.error(f"Failed to start Telomere run: {e}")
+            self.log.error("Failed to start Telomere run: %s", e)
             if self.fail_on_telomere_error:
                 raise
 
-    def _end_telomere_run(self, context: Context, success: bool, error: Optional[Exception] = None) -> None:
+    def _end_telomere_run(
+        self, context: Context, success: bool, error: Exception | None = None
+    ) -> None:
         """End Telomere run for this task."""
         if not self._run_id:
             return
@@ -178,17 +165,17 @@ class TelomereLifecycleOperator(BaseOperator):
 
             if success:
                 hook.end_run(self._run_id, message="Task completed successfully")
-                self.log.info(f"Ended Telomere run {self._run_id} as completed")
+                self.log.info("Ended Telomere run %s as completed", self._run_id)
             else:
                 message = f"Task failed: {str(error)}" if error else "Task failed"
                 # Truncate message to reasonable length
                 if len(message) > 1000:
                     message = message[:997] + "..."
                 hook.fail_run(self._run_id, message=message)
-                self.log.info(f"Ended Telomere run {self._run_id} as failed")
+                self.log.info("Ended Telomere run %s as failed", self._run_id)
 
         except Exception as e:
-            self.log.error(f"Failed to end Telomere run: {e}")
+            self.log.error("Failed to end Telomere run: %s", e)
             if self.fail_on_telomere_error:
                 raise
 
@@ -202,6 +189,7 @@ class TelomereLifecycleOperator(BaseOperator):
             if self.python_callable:
                 # Check if callable expects kwargs (like Airflow's PythonOperator)
                 import inspect
+
                 sig = inspect.signature(self.python_callable)
 
                 # If the function accepts **kwargs, pass the context
@@ -220,10 +208,30 @@ class TelomereLifecycleOperator(BaseOperator):
             self._end_telomere_run(context, success=True)
             return result
 
-        except Exception as e:
-            # Mark as failed
+        except BaseException as e:
+            # BaseException, not Exception: AirflowTaskTimeout (raised when
+            # execution_timeout expires) inherits BaseException directly, and
+            # it must land as a failed run, not dangle to the timeout net.
             self._end_telomere_run(context, success=False, error=e)
             raise
+
+    def on_kill(self) -> None:
+        """
+        Report the run as failed when the task is externally stopped.
+
+        Airflow calls this on SIGTERM / UI mark-failed while the task is
+        running. Without it the Telomere run would dangle until its timeout;
+        with it the failure is reported immediately. Best-effort: a SIGKILL
+        (no Python teardown) still falls back to the run timeout.
+        """
+        if not self._run_id:
+            return
+        try:
+            hook = TelomereHook(self.telomere_conn_id)
+            hook.fail_run(self._run_id, message="Task was externally stopped (killed)")
+            self.log.info("Marked Telomere run %s as failed after task kill", self._run_id)
+        except Exception as e:
+            self.log.error("Failed to mark Telomere run as failed on kill: %s", e)
 
     def _execute(self, context: Context) -> Any:
         """Override this method in subclasses to provide task logic."""
