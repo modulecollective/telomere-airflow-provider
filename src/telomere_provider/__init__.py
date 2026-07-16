@@ -1,6 +1,6 @@
 """Telomere provider for Apache Airflow."""
 
-__version__ = "0.0.1"
+__version__ = "1.0.0"
 
 
 def get_provider_info():

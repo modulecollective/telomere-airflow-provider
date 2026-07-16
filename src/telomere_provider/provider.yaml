@@ -25,14 +25,14 @@ description: |
   processes complete on time. Learn more at https://telomere.modulecollective.com
 
 versions:
-  - 0.0.1
+  - 1.0.0
 
 connection-types:
   - connection-type: telomere
     hook-class-name: telomere_provider.hooks.telomere.TelomereHook
 
 dependencies:
-  - apache-airflow>=2.5.0,<3.0.0
+  - apache-airflow>=3.0,<4
   - requests>=2.28.0
 
 hooks:
