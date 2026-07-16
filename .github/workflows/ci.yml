@@ -47,7 +47,9 @@ jobs:
 
       - name: Install provider + pinned Airflow
         run: |
-          uv venv
+          # --clear: setup-uv with a python-version input already made and
+          # activated a .venv here, and current uv refuses to overwrite one.
+          uv venv --clear
           if [ -n "${{ matrix.constraints }}" ]; then
             curl -sL -o /tmp/constraints.txt "${{ matrix.constraints }}"
             uv pip install -e . --group dev "apache-airflow==${{ matrix.airflow }}" -c /tmp/constraints.txt
@@ -55,8 +57,23 @@ jobs:
             uv pip install -e . --group dev "apache-airflow==${{ matrix.airflow }}"
           fi
 
+      - name: Assert pinned Airflow survived install
+        # A plain `uv run` re-syncs from uv.lock, silently swapping the
+        # matrix-pinned Airflow for the locked one — the floor leg would then
+        # "pass" against the wrong version. --no-sync everywhere below, and
+        # this guard makes any future clobbering a loud failure.
+        run: |
+          expected="${{ matrix.airflow }}"
+          expected="${expected%".*"}"
+          actual="$(uv run --no-sync python -c 'import airflow; print(airflow.__version__)')"
+          echo "airflow==$actual (want $expected or $expected.*)"
+          case "$actual" in
+            "$expected" | "$expected".*) ;;
+            *) echo "::error::Pinned Airflow $expected was clobbered (env has $actual)"; exit 1 ;;
+          esac
+
       - name: Unit + failure-mode matrix (tiers 1 and 2)
-        run: uv run pytest -v
+        run: uv run --no-sync pytest -v
 
   e2e:
     # Real scheduler + real Telomere API. Uses the repo-provisioned
@@ -74,7 +91,9 @@ jobs:
 
       - name: Install e2e test deps
         run: |
-          uv venv
+          # --clear for the same idiom as the test job; harmless today (no
+          # python-version input, so setup-uv makes no venv here).
+          uv venv --clear
           uv pip install pytest requests
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
