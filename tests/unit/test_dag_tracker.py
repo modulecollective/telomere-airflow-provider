@@ -59,11 +59,17 @@ class TestGraphShape:
 
         # none_failed over the leaves == Airflow's dag-run success predicate
         assert canary.trigger_rule == "none_failed"
-        # finalize is a teardown so it always runs without deciding run state;
-        # as_teardown() rewrites its trigger rule to all_done_setup_success,
-        # which behaves as all_done for a teardown with no setups.
+        # Both injected downstream tasks are teardowns: they must not decide
+        # the dag-run state (the user's leaves keep that role) and teardowns
+        # are exempt from force-skips (default ShortCircuitOperator), which
+        # would otherwise skip the canary and cause a false failure report.
+        assert canary.is_teardown
+        # The canary must keep none_failed, so it is flagged directly rather
+        # than via as_teardown() (which rewrites the trigger rule).
         assert finalize.is_teardown
         assert not finalize.on_failure_fail_dagrun
+        # as_teardown() rewrote finalize's rule; for a teardown with no setups
+        # this behaves as all_done.
         assert finalize.trigger_rule == "all_done_setup_success"
 
         for task_id in (START_TASK_ID, CANARY_TASK_ID, FINALIZE_TASK_ID):

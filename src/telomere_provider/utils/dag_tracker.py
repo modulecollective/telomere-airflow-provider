@@ -118,9 +118,16 @@ def enable_telomere_tracking(
         telomere_start >> root_tasks
         leaf_tasks >> telomere_canary >> telomere_finalize
 
-        # Teardown: the finalize task must always run (all_done) yet must not
-        # decide the Airflow dag-run state — otherwise a swallowed Telomere
-        # error on the sole leaf would mark every dag run successful. As a
-        # teardown it is ignored for run-state purposes; the canary (whose
-        # none_failed verdict mirrors the leaves) decides instead.
+        # Both injected downstream tasks are teardowns, for two reasons:
+        # - Teardowns don't decide the Airflow dag-run state, so the user's
+        #   own leaves keep that role exactly as before injection (otherwise
+        #   the always-running finalize would mark every dag run successful).
+        # - Force-skips (e.g. a default ShortCircuitOperator, which skips all
+        #   downstream tasks ignoring trigger rules) exempt teardowns; without
+        #   this a fully short-circuited — successful — dag run would report
+        #   a false failure because the skipped canary left no marker.
+        # The canary keeps its none_failed verdict rule, so it is flagged
+        # directly rather than via as_teardown(), which would rewrite the
+        # trigger rule to all_done_setup_success.
+        telomere_canary.is_teardown = True
         telomere_finalize.as_teardown()
