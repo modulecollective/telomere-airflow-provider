@@ -25,7 +25,7 @@ description: |
   processes complete on time. Learn more at https://telomere.modulecollective.com
 
 versions:
-  - 1.0.0
+  - 2.0.0
 
 connection-types:
   - connection-type: telomere
@@ -44,4 +44,3 @@ operators:
   - integration-name: Telomere
     python-modules:
       - telomere_provider.operators.telomere
-      - telomere_provider.operators.dag

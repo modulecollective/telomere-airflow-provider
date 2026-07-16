@@ -1,6 +1,6 @@
 [project]
 name = "telomere-airflow-provider"
-version = "1.0.0"
+version = "2.0.0"
 description = "Apache Airflow provider for Telomere lifecycle tracking"
 authors = [{name = "Module Collective LLC", email = "hello@modulecollective.com"}]
 license = {text = "Apache-2.0"}
@@ -38,6 +38,11 @@ Repository = "https://github.com/modulecollective/telomere-airflow-provider"
 
 [project.entry-points."apache_airflow_provider"]
 provider_info = "telomere_provider:get_provider_info"
+
+# Provider-declared plugins are skipped when Airflow lazily discovers
+# providers (the default), while plugin entry points are always loaded.
+[project.entry-points."airflow.plugins"]
+telomere = "telomere_provider.plugins.plugin:TelomerePlugin"
 
 [build-system]
 requires = ["setuptools>=64", "wheel"]

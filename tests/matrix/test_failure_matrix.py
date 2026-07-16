@@ -15,10 +15,10 @@ wrongly.
 
 import importlib.util
 from pathlib import Path
+from unittest.mock import patch
 
+from airflow.models.dagrun import DagRun
 from airflow.utils.state import DagRunState, TaskInstanceState
-
-from telomere_provider.operators.dag import TelomereFinalizeOperator
 
 _DAGS_PATH = Path(__file__).parent / "dags" / "matrix_dags.py"
 _spec = importlib.util.spec_from_file_location("matrix_dags", _DAGS_PATH)
@@ -30,30 +30,44 @@ def ti_states(dr):
     return {ti.task_id: ti.state for ti in dr.get_task_instances()}
 
 
+def run_dag(dag):
+    """Run dag.test(), supplying the scheduler transition it bypasses."""
+    real_update_state = DagRun.update_state
+    notified_running = False
+
+    def update_state(dag_run, *args, **kwargs):
+        nonlocal notified_running
+        if not notified_running:
+            notified_running = True
+            dag_run.notify_dagrun_state_changed("started")
+        return real_update_state(dag_run, *args, **kwargs)
+
+    with patch.object(DagRun, "update_state", update_state):
+        return dag.test()
+
+
 class TestLayer1Explicit:
     def test_row1_all_tasks_succeed(self, telomere):
-        dr = dags.dag_success.test()
+        dr = run_dag(dags.dag_success)
         assert dr.state == DagRunState.SUCCESS
         assert telomere.resolutions() == [("end", "tlm-run-1")]
 
     def test_row2_leaf_task_fails(self, telomere):
-        dr = dags.dag_leaf_fails.test()
+        dr = run_dag(dags.dag_leaf_fails)
         assert dr.state == DagRunState.FAILED
         assert telomere.resolutions() == [("fail", "tlm-run-1")]
 
     def test_row3_midgraph_task_fails(self, telomere):
         # 0.0.1 missed this: the leaf goes upstream_failed (not failed), so a
         # one_failed fail-operator on the leaves never fired.
-        dr = dags.dag_midgraph_fails.test()
+        dr = run_dag(dags.dag_midgraph_fails)
         assert dr.state == DagRunState.FAILED
         states = ti_states(dr)
         assert states["c"] == TaskInstanceState.UPSTREAM_FAILED
-        assert states["telomere_canary"] == TaskInstanceState.UPSTREAM_FAILED
-        assert states["telomere_finalize"] == TaskInstanceState.SUCCESS
         assert telomere.resolutions() == [("fail", "tlm-run-1")]
 
     def test_row4_branch_skips_tolerated(self, telomere):
-        dr = dags.dag_branch_skip.test()
+        dr = run_dag(dags.dag_branch_skip)
         assert dr.state == DagRunState.SUCCESS
         states = ti_states(dr)
         assert states["right"] == TaskInstanceState.SKIPPED
@@ -61,31 +75,25 @@ class TestLayer1Explicit:
 
     def test_row5_all_leaves_skipped(self, telomere):
         # Fully short-circuited run is an Airflow success; must not alert.
-        dr = dags.dag_all_skipped.test()
+        dr = run_dag(dags.dag_all_skipped)
         assert dr.state == DagRunState.SUCCESS
-        states = ti_states(dr)
-        assert states["t"] == TaskInstanceState.SKIPPED
-        assert states["telomere_canary"] == TaskInstanceState.SUCCESS
+        assert ti_states(dr)["t"] == TaskInstanceState.SKIPPED
         assert telomere.resolutions() == [("end", "tlm-run-1")]
 
     def test_row5b_force_skip_still_reports_completed(self, telomere):
-        # A default ShortCircuitOperator force-skips ALL downstream tasks,
-        # trigger rules ignored — but teardowns are exempt, which is exactly
-        # why the injected canary and finalize are teardowns. Without that, a
-        # fully short-circuited (successful!) dag run would report a false
-        # failure: skipped canary, no marker.
-        dr = dags.dag_force_skip.test()
+        # A default ShortCircuitOperator force-skips all downstream tasks.
+        # Airflow still calls the DAG run successful, and the listener reports
+        # that scheduler-computed verdict directly.
+        dr = run_dag(dags.dag_force_skip)
         assert dr.state == DagRunState.SUCCESS
-        states = ti_states(dr)
-        assert states["t"] == TaskInstanceState.SKIPPED
-        assert states["telomere_canary"] == TaskInstanceState.SUCCESS
+        assert ti_states(dr)["t"] == TaskInstanceState.SKIPPED
         assert telomere.resolutions() == [("end", "tlm-run-1")]
 
     def test_row6_recovery_leaf_mirrors_airflow_success(self, telomere):
         # Mid-graph failure + all_done recovery leaf that succeeds: Airflow
         # calls the run a success, so must Telomere (operator-confirmed:
         # recovered runs must not alert).
-        dr = dags.dag_recovery_leaf.test()
+        dr = run_dag(dags.dag_recovery_leaf)
         assert dr.state == DagRunState.SUCCESS
         states = ti_states(dr)
         assert states["a"] == TaskInstanceState.FAILED
@@ -95,59 +103,31 @@ class TestLayer1Explicit:
     def test_row7_task_retry_success_no_premature_fail(self, telomere):
         # Trigger rules see final states only: a fail-then-retry-success run
         # is completed, with no fail call in between.
-        dr = dags.dag_task_retry.test()
+        dr = run_dag(dags.dag_task_retry)
         assert dr.state == DagRunState.SUCCESS
         assert telomere.resolutions() == [("end", "tlm-run-1")]
 
     def test_row8_mapped_instance_fails(self, telomere):
-        dr = dags.dag_mapped_fail.test()
+        dr = run_dag(dags.dag_mapped_fail)
         assert dr.state == DagRunState.FAILED
         assert telomere.resolutions() == [("fail", "tlm-run-1")]
 
     def test_row9_api_down_at_start(self, telomere):
-        # No run was ever started, so there is nothing to resolve: finalize
-        # must no-op (no XCom), not invent a report. Scheduled DAGs stay
+        # No run was ever started, so there is nothing to resolve: the
+        # terminal listener must no-op, not invent a report. Scheduled DAGs stay
         # covered by the .schedule deadline; the manual-run gap is documented.
         telomere.start_down()
-        dr = dags.dag_success.test()
+        dr = run_dag(dags.dag_success)
         assert dr.state == DagRunState.SUCCESS  # tracking failure never fails the DAG
         assert telomere.resolutions() == []
 
-    def test_row10_api_down_at_finalize(self, telomere):
+    def test_row10_api_down_at_terminal_event(self, telomere):
         # The report attempt errors; the run dangles server-side and the
         # Telomere timeout (Layer 2) raises the alert. Locally we assert no
         # resolution succeeded and the DAG itself was not failed by it.
         telomere.resolve_down()
-        dr = dags.dag_success.test()
+        dr = run_dag(dags.dag_success)
         assert dr.state == DagRunState.SUCCESS
         # end was attempted (and blew up) — but never succeeded
         assert telomere.attempted_resolutions() == [("end", "tlm-run-1")]
         assert telomere.resolutions() == []
-
-    def test_row11_finalize_crash_recovered_by_retry(self, telomere, monkeypatch):
-        # A transient crash of the finalize task itself (worker death analog)
-        # is absorbed by its retries=2 — Layer 1 still reports.
-        real_execute = TelomereFinalizeOperator.execute
-        crashes = {"n": 0}
-
-        def crash_once(self, context):
-            crashes["n"] += 1
-            if crashes["n"] == 1:
-                raise RuntimeError("simulated worker death")
-            return real_execute(self, context)
-
-        monkeypatch.setattr(TelomereFinalizeOperator, "execute", crash_once)
-        dr = dags.dag_success.test()
-        assert dr.state == DagRunState.SUCCESS
-        assert crashes["n"] == 2
-        assert telomere.resolutions() == [("end", "tlm-run-1")]
-
-
-class TestEmptyOperatorTrap:
-    def test_canary_marker_exists_after_success(self, telomere):
-        # Regression pin for the EmptyOperator trap: if the canary were ever
-        # "optimized" into a no-execute task, no marker XCom would exist and
-        # this run would be reported failed instead of completed.
-        dr = dags.dag_success.test()
-        assert dr.state == DagRunState.SUCCESS
-        assert telomere.resolutions() == [("end", "tlm-run-1")]

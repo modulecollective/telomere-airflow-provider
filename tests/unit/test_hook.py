@@ -184,6 +184,24 @@ class TestRuns:
         requests_mock.get(f"{BASE}/api/runs/r1", json={"id": "r1", "status": "running"})
         assert hook.get_run("r1")["status"] == "running"
 
+    def test_list_runs_filters_and_paginates(self, hook, requests_mock):
+        get = requests_mock.get(
+            f"{BASE}/api/runs",
+            [
+                {"json": {"items": [{"id": "r1"}], "total": 2, "page": 1, "pageSize": 100}},
+                {"json": {"items": [{"id": "r2"}], "total": 2, "page": 2, "pageSize": 100}},
+            ],
+        )
+
+        assert hook.list_runs("foo", status="running") == [{"id": "r1"}, {"id": "r2"}]
+        assert get.request_history[0].qs == {
+            "lifecycleidorname": ["foo"],
+            "page": ["1"],
+            "pagesize": ["100"],
+            "status": ["running"],
+        }
+        assert get.request_history[1].qs["page"] == ["2"]
+
     def test_respawn(self, hook, requests_mock):
         post = requests_mock.post(f"{BASE}/api/lifecycles/foo/respawn", json={"id": "r2"})
         hook.respawn("foo", timeout_seconds=60, tags={"t": "1"}, previous_run_resolution="fail")

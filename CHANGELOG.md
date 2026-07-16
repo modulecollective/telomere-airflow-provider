@@ -5,6 +5,32 @@ All notable changes to telomere-airflow-provider will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-07-16
+
+DAG-level tracking now uses Airflow's listener API. The scheduler reports its
+own terminal DAG-run verdict, including `dagrun_timeout` and deadlocked runs,
+without adding tasks to the DAG or consuming worker slots.
+
+### Changed
+
+- `enable_telomere_tracking(dag)` is now an opt-in shim that adds the
+  `telomere` DAG tag. DAGs may add that tag directly instead.
+- Execution lifecycle names are fixed at `<dag_id>.dag`; schedule lifecycles
+  are fixed at `<dag_id>.schedule`; the listener uses `telomere_default`.
+- Run timeouts use `dagrun_timeout`, then the data-interval length, then one
+  hour. Schedule deadlines prefer Airflow's `next_dagrun_create_after`.
+- Terminal events correlate to running Telomere runs by the Airflow `run_id`
+  tag, so scheduler and API-server events survive process restarts.
+
+### Removed
+
+- `enable_telomere_tracking` options `lifecycle_name`, `track_schedule`,
+  `timeout_seconds`, `tags`, `telomere_conn_id`, and
+  `fail_on_telomere_error`. Passing them now raises `TypeError`.
+- `TelomereDAGStartOperator`, `TelomereCanaryOperator`, and
+  `TelomereFinalizeOperator`. The task-level `TelomereLifecycleOperator` is
+  unchanged.
+
 ## [1.0.0] - 2026-07-16
 
 Airflow 3 rewrite, built around a tracking guarantee: Telomere never reports

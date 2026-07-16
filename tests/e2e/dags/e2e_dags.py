@@ -54,10 +54,8 @@ def sleep_forever():
     sleep(300)
 
 
-# Scenario: the timeout net (Layer 2). dagrun_timeout kills the run mid-flight
-# so nothing ever reports explicitly; the Telomere run must still alert by
-# hitting the timeout it was created with. This is the only tier that can
-# prove Layer 2 end to end.
+# Scenario: dagrun_timeout. Airflow's scheduler marks the run failed and the
+# listener must report that terminal state even though no task can finalize it.
 with DAG(
     "e2e_timeout_net",
     schedule=None,
@@ -66,4 +64,4 @@ with DAG(
     dagrun_timeout=timedelta(seconds=30),
 ) as dag_timeout_net:
     PythonOperator(task_id="sleeper", python_callable=sleep_forever)
-enable_telomere_tracking(dag_timeout_net, timeout_seconds=25)
+enable_telomere_tracking(dag_timeout_net)

@@ -74,20 +74,15 @@ send = BashOperator(
 extract >> generate >> send
 
 # ✨ Add Telomere monitoring with one line! ✨
-enable_telomere_tracking(
-    dag,
-    lifecycle_name="customer_report",
-    track_schedule=True,  # Monitors if DAG runs on schedule
-    tags={"team": "analytics", "priority": "high"},
-)
+enable_telomere_tracking(dag)
 
 # That's it! Telomere will now:
-# 1. Create "simple_dag_tracking.customer_report.dag" lifecycle
-#    - Every run is created with a timeout up front, so even a run that
-#      dies without a trace (killed workers, dagrun_timeout) raises an alert
+# 1. Create "simple_dag_tracking.dag" lifecycle
+#    - Every run is created with a timeout up front, so interrupted reporting
+#      still degrades to an alert
 #    - The run is reported completed or failed the moment it finishes,
 #      mirroring Airflow's own final state — including mid-graph failures
-# 2. Create "simple_dag_tracking.customer_report.schedule" lifecycle
+# 2. Create "simple_dag_tracking.schedule" lifecycle
 #    - Uses respawn pattern to monitor schedule compliance
 #    - Alerts if the next run doesn't start on time (+5 min grace)
 # 3. Send alerts via webhooks, email, or integrations you configure in Telomere

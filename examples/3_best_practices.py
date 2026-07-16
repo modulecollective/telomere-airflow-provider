@@ -149,24 +149,14 @@ dependency_check >> extract >> transform >> load >> quality_check
 quality_check >> [update_metadata, send_notifications]
 
 # Enable DAG-level tracking for overall pipeline monitoring
-enable_telomere_tracking(
-    dag,
-    lifecycle_name="production_etl",
-    track_schedule=True,  # Alert if pipeline doesn't start on time
-    tags={
-        "environment": "production",
-        "type": "etl",
-        "sla": "4_hours",  # Expected to complete within 4 hours
-    },
-)
+enable_telomere_tracking(dag)
 
 # What this gives you:
 # 1. DAG-level monitoring in Telomere:
-#    - "best_practices.production_etl.dag" - tracks each pipeline run;
+#    - "best_practices.dag" - tracks each pipeline run;
 #      failures anywhere in the graph are reported the moment the run
-#      finishes, and a run that dies without a trace still alerts via
-#      its timeout
-#    - "best_practices.production_etl.schedule" - monitors schedule
+#      finishes, and interrupted reporting still alerts via the run timeout
+#    - "best_practices.schedule" - monitors schedule
 #      compliance; alerts if the next run doesn't start on time
 #
 # 2. Task-level lifecycles for critical operations:

@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,7 @@ class FakeTelomere:
     def __init__(self, requests_mock):
         self.m = requests_mock
         self._next_run = 0
+        self._runs = []
         self._resolved = []
         self.m.get(re.compile(rf"{BASE}/api/lifecycles/[^/]+$"), status_code=404)
         self.m.post(f"{BASE}/api/lifecycles", status_code=201, json={"created": True})
@@ -45,16 +47,32 @@ class FakeTelomere:
             re.compile(rf"{BASE}/api/lifecycles/[^/]+/respawn$"), json={"id": "schedule-run"}
         )
         self.m.post(re.compile(rf"{BASE}/api/lifecycles/[^/]+/runs$"), json=self._start_run)
+        self.m.get(f"{BASE}/api/runs", json=self._list_runs)
         self.m.post(re.compile(rf"{BASE}/api/runs/[^/]+/end$"), json=self._resolve_run)
         self.m.post(re.compile(rf"{BASE}/api/runs/[^/]+/fail$"), json=self._resolve_run)
 
     def _start_run(self, request, context):
         self._next_run += 1
-        return {"id": f"tlm-run-{self._next_run}"}
+        run = {
+            "id": f"tlm-run-{self._next_run}",
+            "status": "running",
+            "startedAt": datetime.now(timezone.utc).isoformat(),
+            "tags": request.json().get("tags", {}),
+        }
+        self._runs.insert(0, run)
+        return run
+
+    def _list_runs(self, request, context):
+        status = request.qs.get("status", [None])[0]
+        items = [run for run in self._runs if status is None or run["status"] == status]
+        return {"items": items, "total": len(items), "page": 1, "pageSize": 100}
 
     def _resolve_run(self, request, context):
         action, run_id = self._parse_resolution(request.path)
         self._resolved.append((action, run_id))
+        for run in self._runs:
+            if run["id"] == run_id:
+                run["status"] = "completed" if action == "end" else "failed"
         return {"status": "completed" if action == "end" else "failed"}
 
     @staticmethod

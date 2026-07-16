@@ -16,19 +16,11 @@ from airflow.providers.standard.operators.python import (
 from airflow.sdk import DAG
 
 from telomere_provider.utils import enable_telomere_tracking
-from telomere_provider.utils.dag_tracker import (
-    CANARY_TASK_ID,
-    FINALIZE_TASK_ID,
-    START_TASK_ID,
-)
 
 
 def track(dag):
-    """enable_telomere_tracking, with retry delays zeroed so retry scenarios
-    don't stall the in-process dag.test() loop. Retry *counts* are untouched."""
+    """Opt the DAG into listener-based tracking."""
     enable_telomere_tracking(dag)
-    for task_id in (START_TASK_ID, CANARY_TASK_ID, FINALIZE_TASK_ID):
-        dag.get_task(task_id).retry_delay = timedelta(seconds=0)
     return dag
 
 
@@ -76,8 +68,7 @@ track(dag_branch_skip)
 
 
 # Row 5: every user leaf is skipped (short-circuit that respects trigger
-# rules) -> the canary still runs (none_failed tolerates skips) -> completed,
-# mirroring Airflow's own success verdict for an all-skipped run.
+# rules) -> Airflow marks the run successful -> listener reports completed.
 with DAG("matrix_all_skipped", schedule=None) as dag_all_skipped:
     sc = ShortCircuitOperator(
         task_id="sc",
@@ -90,9 +81,8 @@ track(dag_all_skipped)
 
 
 # Row 5b: a default ShortCircuitOperator force-skips ALL downstream tasks,
-# trigger rules ignored — but teardowns are exempt, which is exactly why the
-# injected canary and finalize are teardowns. The canary still runs and the
-# run is reported completed, mirroring Airflow's own success verdict.
+# trigger rules ignored. Airflow still marks the run successful, and the
+# listener reports that verdict directly.
 with DAG("matrix_force_skip", schedule=None) as dag_force_skip:
     sc = ShortCircuitOperator(task_id="sc", python_callable=lambda: False)
     t = PythonOperator(task_id="t", python_callable=ok)

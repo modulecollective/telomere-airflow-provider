@@ -237,7 +237,7 @@ class TelomereHook(BaseHook):
         already-ended run returns 200 and overwrites the prior resolution.
         A 409 is nevertheless treated as success, because the documented
         contract is that only running runs can be ended — if the server
-        ever enforces that, retried finalize tasks must stay idempotent.
+        ever enforces that, retried callers must stay idempotent.
 
         :param run_id: ID of the run
         :param message: Optional completion message
@@ -253,7 +253,7 @@ class TelomereHook(BaseHook):
         already-ended run returns 200 and overwrites the prior resolution.
         A 409 is nevertheless treated as success, because the documented
         contract is that only running runs can be failed — if the server
-        ever enforces that, retried finalize tasks must stay idempotent.
+        ever enforces that, retried callers must stay idempotent.
 
         :param run_id: ID of the run
         :param message: Optional failure message
@@ -291,6 +291,34 @@ class TelomereHook(BaseHook):
         result = self._request("GET", f"/api/runs/{run_id}")
         assert result is not None
         return result
+
+    def list_runs(
+        self,
+        lifecycle_name: str,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List all runs for a lifecycle, optionally filtered by status."""
+        page = 1
+        page_size = 100
+        runs: list[dict[str, Any]] = []
+
+        while True:
+            params: dict[str, Any] = {
+                "lifecycleIdOrName": lifecycle_name,
+                "page": page,
+                "pageSize": page_size,
+            }
+            if status is not None:
+                params["status"] = status
+
+            result = self._request("GET", "/api/runs", params=params)
+            assert result is not None
+            items = result["items"]
+            runs.extend(items)
+
+            if len(runs) >= result["total"]:
+                return runs
+            page += 1
 
     def respawn(
         self,
