@@ -65,7 +65,9 @@ jobs:
         run: |
           expected="${{ matrix.airflow }}"
           expected="${expected%".*"}"
-          actual="$(uv run --no-sync python -c 'import airflow; print(airflow.__version__)')"
+          # tail -n1: airflow can emit import-time warnings on stdout (e.g.
+          # unwritable AIRFLOW_HOME); only the last line is the version.
+          actual="$(uv run --no-sync python -c 'import airflow; print(airflow.__version__)' | tail -n1)"
           echo "airflow==$actual (want $expected or $expected.*)"
           case "$actual" in
             "$expected" | "$expected".*) ;;
