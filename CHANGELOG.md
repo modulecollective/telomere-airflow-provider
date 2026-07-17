@@ -5,6 +5,23 @@ All notable changes to telomere-airflow-provider will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-07-17
+
+Telomere now enforces the documented running-only contract: `end`/`fail` on a
+non-running run returns 409 instead of overwriting the prior resolution. The
+provider already treated that 409 as success, so there is no runtime behavior
+change — this release updates docs and test mocks to describe the enforced
+contract as current fact.
+
+### Changed
+
+- Hook docstrings, the session-retry comment, and the tolerated-409 log line
+  now state the enforced running-only contract instead of the old
+  200-overwrite behavior.
+- The matrix test fake (`FakeTelomere`) returns 409 on `end`/`fail` for
+  non-running runs, matching prod; no DAG-flow test depended on overwrite
+  semantics.
+
 ## [2.0.0] - 2026-07-16
 
 DAG-level tracking now uses Airflow's listener API. The scheduler reports its

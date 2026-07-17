@@ -69,6 +69,12 @@ class FakeTelomere:
 
     def _resolve_run(self, request, context):
         action, run_id = self._parse_resolution(request.path)
+        # Match prod: only running runs can be resolved; end/fail on any other
+        # status returns 409 rather than overwriting the prior resolution.
+        for run in self._runs:
+            if run["id"] == run_id and run["status"] != "running":
+                context.status_code = 409
+                return {"error": 'Only runs in "running" status can be ended'}
         self._resolved.append((action, run_id))
         for run in self._runs:
             if run["id"] == run_id:

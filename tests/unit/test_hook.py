@@ -164,11 +164,13 @@ class TestRuns:
 
     @pytest.mark.parametrize("action", ["end", "fail"])
     def test_resolve_run_already_ended_409_is_success(self, hook, requests_mock, action):
-        # Today's server re-resolves ended runs with 200, but the documented
-        # contract is running-only; if enforcement ever lands as a 409,
-        # retried finalizes must still not raise.
+        # The server enforces the running-only contract: end/fail on a
+        # non-running run returns 409. A retried finalize must treat that as
+        # success rather than raising.
         requests_mock.post(
-            f"{BASE}/api/runs/r1/{action}", status_code=409, json={"error": "already ended"}
+            f"{BASE}/api/runs/r1/{action}",
+            status_code=409,
+            json={"error": 'Only runs in "running" status can be ended'},
         )
         method = hook.end_run if action == "end" else hook.fail_run
         assert method("r1") == {}

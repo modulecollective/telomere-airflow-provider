@@ -1,6 +1,6 @@
 [project]
 name = "telomere-airflow-provider"
-version = "2.0.0"
+version = "2.0.1"
 description = "Apache Airflow provider for Telomere lifecycle tracking"
 authors = [{name = "Module Collective LLC", email = "hello@modulecollective.com"}]
 license = {text = "Apache-2.0"}
